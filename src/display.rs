@@ -12,7 +12,7 @@ use crate::Null;
 /// The Display Struct is just a wrapper of a [*mut Display] from XLib.
 /// 
 /// When this struct is dropped, the reference will be dropped using [XCloseDisplay].
-pub struct Display(pub(crate) *mut XDisplay);
+pub struct Display(pub *mut XDisplay);
 impl Display {
     /// Opens a connection to the x11 server.
     /// 

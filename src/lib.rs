@@ -78,7 +78,7 @@ pub use self::{
     atom::Atom,
     display::Display,
     session::Session,
-    window::Window,
+    window::{Window, XImg, XColor},
     windows::Windows,
 };
 

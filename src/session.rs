@@ -122,6 +122,59 @@ impl Session {
 
         Err(NotSupported)
     }
+
+    /// Get window by provided name on the screen.
+    ///
+    /// return [Window] on success or [None] if not found or error
+    pub fn get_window_by_name(&self, name: impl AsRef<[u8]>) -> Option<Window> {
+        let name = name.as_ref();
+        let Session{ display, root_window, client_list_atom, .. } = self;
+        let root = root_window.unwrap_or_else(|| Window::default_root_window(display));
+        let atom = client_list_atom.unwrap_or_else(|| Atom::new(display, NET_CLIENT_LIST).unwrap());
+
+        let GetWindowPropertyResponse{
+            actual_type_return: return_type,
+            actual_format_return: return_format,
+            nitems_return: return_nitems,
+            proper_return: return_proper,
+            ..
+        } = unsafe { get_window_property(display, root, atom, XA_WINDOW).ok()? };
+        if return_type == XA_WINDOW {
+            return match return_format {
+                8 => {
+                    let res = unsafe { slice::from_raw_parts(return_proper as *mut u8, return_nitems as usize) }
+                        .iter()
+                        .map(|x| Window(*x as XWindow))
+                        .find(|it| it.match_title(display, name));
+                    unsafe { XFree(return_proper as *mut c_void) };
+                    res
+                },
+                16 => {
+                    let res = unsafe { slice::from_raw_parts(return_proper as *mut u16, return_nitems as usize) }
+                        .iter()
+                        .map(|x| Window(*x as XWindow))
+                        .find(|it| it.match_title(display, name));
+                    unsafe { XFree(return_proper as *mut c_void) };
+                    res
+                },
+                32 => {
+                    let res = unsafe { slice::from_raw_parts(return_proper as *mut usize, return_nitems as usize) }
+                        .iter()
+                        .map(|x| Window(*x as XWindow))
+                        .find(|it| it.match_title(display, name));
+                    unsafe { XFree(return_proper as *mut c_void) };
+                    res
+                },
+                _ => {
+                    unsafe { XFree(return_proper as *mut c_void) };
+                    None
+                },
+            };
+        }  else {
+            unsafe { XFree(return_proper as *mut c_void) }; }
+
+      None
+    }
     /// Gets the currently active window in the display.
     pub fn active_window(&mut self) -> Result<Window, NotSupported> {
         Window::active_window(self)
