@@ -6,6 +6,6 @@ fn main() {
     println!("{:?}",
         session.active_window()
             .expect("Error getting the active window.")
-            .get_title(&session.display)
+            .get_title()
             .expect("Error getting the title of the window."));
 }

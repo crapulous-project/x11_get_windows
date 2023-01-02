@@ -6,11 +6,12 @@ use std::{
 	slice,
 };
 use std::borrow::BorrowMut;
+use std::ffi::{c_int, c_long, c_uint};
 use std::ops::Deref;
 use std::rc::Rc;
 use std::slice::Windows;
 
-use x11::xlib::{Window as XWindow, XA_WINDOW, XAllPlanes, XDefaultRootWindow, XFree, XGetImage, XGetWindowAttributes, XGetWMName, XImage, XTextProperty, XWindowAttributes};
+use x11::xlib::{CurrentTime, RevertToParent, True, Window as XWindow, XA_WINDOW, XAllPlanes, XButtonEvent, XDefaultRootWindow, XEvent, XFree, XGetImage, XGetWindowAttributes, XGetWMName, XImage, XKeyEvent, XKeysymToKeycode, XSendEvent, XSetInputFocus, XTextProperty, XWindowAttributes};
 use x11::xlib;
 
 use crate::{
@@ -20,14 +21,24 @@ use crate::{
 	Session,
 	util::get_window_property,
 };
+use crate::event::btn_event::ButtonType;
+use crate::event::key_event::KeyType;
 
 /// This struct represents a window and holds the ID of that window that can be used
 /// to query for its name.
-pub struct Window(pub XWindow, pub Rc<Display>);
+pub struct Window {
+	/// raw reference to window
+	pub window: XWindow,
+	/// shared display reference
+	pub display: Rc<Display>,
+}
 
 impl Clone for Window {
 	fn clone(&self) -> Self {
-		Self(self.0, Rc::clone(&self.1))
+		Self {
+			window: self.window,
+			display: Rc::clone(&self.display),
+		}
 	}
 }
 
@@ -36,8 +47,11 @@ impl Window {
 	///
 	/// A wrapper around the [XDefaultRootWindow] function.
 	pub fn default_root_window(display: Rc<Display>) -> Self {
-		let win = unsafe { XDefaultRootWindow(display.0) };
-		Window(win, display)
+		let window = unsafe { XDefaultRootWindow(display.0) };
+		Window {
+			window,
+			display,
+		}
 	}
 	/// Gets the current active window.
 	///
@@ -54,17 +68,26 @@ impl Window {
 			8 => {
 				unsafe { slice::from_raw_parts(response.proper_return as *const u8, response.nitems_return as usize) }
 					.first()
-					.map(|x| Window(*x as XWindow, Rc::clone(display)))
+					.map(|x| Window {
+						window: *x as XWindow,
+						display: Rc::clone(display),
+					})
 			}
 			16 => {
 				unsafe { slice::from_raw_parts(response.proper_return as *const u16, response.nitems_return as usize) }
 					.first()
-					.map(|x| Window(*x as XWindow, Rc::clone(display)))
+					.map(|x| Window {
+						window: *x as XWindow,
+						display: Rc::clone(display),
+					})
 			}
 			32 => {
 				unsafe { slice::from_raw_parts(response.proper_return as *const usize, response.nitems_return as usize) }
 					.first()
-					.map(|x| Window(*x as XWindow, Rc::clone(display)))
+					.map(|x| Window {
+						window: *x as XWindow,
+						display: Rc::clone(display),
+					})
 			}
 			_ => { None }
 		};
@@ -76,7 +99,7 @@ impl Window {
 	/// If the window does not have a title, a null pointer may be returned.
 	/// In that case the [Null] error is returned.
 	/// However, I have not encountered a [Null] error yet.
-	pub fn get_title(&self, display: &Display) -> Result<WindowTitle, Null> {
+	pub fn get_title(&self) -> Result<WindowTitle, Null> {
 		let mut text_property = XTextProperty {
 			value: null_mut(),
 			encoding: 0,
@@ -85,8 +108,8 @@ impl Window {
 		};
 		unsafe {
 			XGetWMName(
-				display.0,
-				self.0,
+				self.display.0,
+				self.window,
 				&mut text_property,
 			)
 		};
@@ -105,8 +128,8 @@ impl Window {
 		};
 		unsafe {
 			XGetWMName(
-				self.1.0,
-				self.0,
+				self.display.0,
+				self.window,
 				&mut text_property,
 			)
 		};
@@ -119,7 +142,7 @@ impl Window {
 	}
 
 	/// Get window attribute
-	pub fn get_attr(&self, display: &Display) -> XWindowAttributes {
+	pub fn get_attr(&self) -> XWindowAttributes {
 		let mut attr = XWindowAttributes {
 			x: 0,
 			y: 0,
@@ -145,18 +168,108 @@ impl Window {
 			override_redirect: 0,
 			screen: null_mut(),
 		};
-		unsafe { XGetWindowAttributes(display.0, self.0, attr.borrow_mut() as _) };
+		unsafe { XGetWindowAttributes(self.display.0, self.window, attr.borrow_mut() as _) };
 		attr
 	}
 
 	/// Capture screenshot of this window
-	pub fn capture(&self, display: &Display) -> XImg {
-		let attr = self.get_attr(display);
+	pub fn capture(&self) -> XImg {
+		let attr = self.get_attr();
 		let width = attr.width as u32;
 		let height = attr.height as u32;
 
-		let img = unsafe { XGetImage(display.0, self.0, 0, 0, width, height, XAllPlanes(), xlib::ZPixmap) };
+		let img = unsafe { XGetImage(self.display.0, self.window, 0, 0, width, height, XAllPlanes(), xlib::ZPixmap) };
 		XImg { img }
+	}
+
+	/// Request to focus current window
+	/// # Known issue
+	/// + if compositor is disabled it can't send event (if you have compositor it will be fine)
+	///     + window is beside fullscreen window
+	///     + minimized window
+	pub fn focus(&self) {
+		unsafe { XSetInputFocus(self.display.0, self.window, RevertToParent, CurrentTime); }
+	}
+
+	/// Send event to window
+	#[inline]
+	pub fn send(&self, mut ev: XEvent, mask: c_long) {
+		unsafe { XSendEvent(self.display.0, self.window, True, mask, (&mut ev) as _); }
+	}
+
+	/// Send key to current window (you have to [Self::focus] before send key)
+	/// # Example
+	/// ```donttest
+	/// use x11::keysym::XK_F1;
+	/// use x11_get_windows::event::key_event::KeyType;
+	/// use x11_get_windows::Window;
+	/// let win:Window;
+	/// win.focus();
+	/// win.send_key(KeyType::Press, XK_F1, 0);
+	/// win.send_key(KeyType::Release, XK_F1, 0);
+	/// ```
+	pub fn send_key(&self, typ: KeyType, keycode: c_uint, modifiers: c_uint) {
+		let mask = typ.mask();
+		let code = unsafe { XKeysymToKeycode(self.display.0, keycode as _) };
+		let ev = XEvent {
+			key: XKeyEvent {
+				type_: typ.into(),
+				serial: 0,
+				send_event: 1,
+				display: self.display.0,
+				window: self.window,
+				root: Window::default_root_window(Rc::clone(&self.display)).window,
+				subwindow: 0,
+				time: CurrentTime,
+				x: 1,
+				y: 1,
+				x_root: 1,
+				y_root: 1,
+				state: modifiers,
+				keycode: code as _,
+				same_screen: True,
+			}
+		};
+
+		self.send(ev, mask);
+	}
+
+	/// # Example
+	/// ```donttest
+	/// use x11::keysym::XK_F1;
+	/// use x11_get_windows::event::key_event::KeyType;
+	/// use x11_get_windows::Window;
+	/// let win:Window;
+	/// win.focus();
+	/// win.send_mouse(ButtonType::Press, Button1, 1, 1, 0);
+	/// win.send_mouse(ButtonType::Release, Button1, 1, 1, 0);
+	/// ```
+	pub fn send_btn(&self, typ: ButtonType, button: c_uint, mut x: c_int, mut y: c_int, modifiers: c_uint) {
+		let mask = typ.mask();
+		let attr = self.get_attr();
+		x += attr.x;
+		y += attr.y;
+		let mut ev = XEvent {
+			button: XButtonEvent {
+				type_: typ.into(),
+				serial: 0,
+				send_event: 1,
+				display: self.display.0,
+				window: self.window,
+				root: Window::default_root_window(Rc::clone(&self.display)).window,
+				subwindow: 0,
+				time: CurrentTime,
+				x,
+				y,
+				x_root: x,
+				y_root: y,
+				state: modifiers,
+				button,
+				same_screen: True,
+			}
+		};
+
+		self.send(ev, mask);
 	}
 }
 

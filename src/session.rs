@@ -70,12 +70,12 @@ impl Session {
 	pub fn root(&self) -> &Window {
 		self.root_window.get_or_insert_with(|| Window::default_root_window(Rc::clone(&self.display)))
 	}
-	
+
 	/// Get client list window atom of this session
 	pub fn client_list(&self) -> &Atom {
 		self.client_list_atom.get_or_insert_with(|| Atom::new(&self.display, NET_CLIENT_LIST).unwrap())
 	}
-	
+
 	/// Get client list active window atom of this session
 	pub fn active_list(&self) -> &Atom {
 		self.active_window_atom.get_or_insert_with(|| Atom::new(&self.display, NET_ACTIVE_WINDOW).unwrap())
@@ -104,7 +104,10 @@ impl Session {
 				8 => {
 					let array = unsafe { slice::from_raw_parts(return_proper as *mut u8, return_nitems as usize) }
 						.iter()
-						.map(|x| Window(*x as XWindow, Rc::clone(display)))
+						.map(|x| Window {
+							window: *x as XWindow,
+							display: Rc::clone(display),
+						})
 						.collect();
 					unsafe { XFree(return_proper as *mut c_void) };
 					Windows(array)
@@ -112,7 +115,10 @@ impl Session {
 				16 => {
 					let array = unsafe { slice::from_raw_parts(return_proper as *mut u16, return_nitems as usize) }
 						.iter()
-						.map(|x| Window(*x as XWindow, Rc::clone(display)))
+						.map(|x| Window {
+							window: *x as XWindow,
+							display: Rc::clone(display),
+						})
 						.collect();
 					unsafe { XFree(return_proper as *mut c_void) };
 					Windows(array)
@@ -120,7 +126,10 @@ impl Session {
 				32 => {
 					let array = unsafe { slice::from_raw_parts(return_proper as *mut usize, return_nitems as usize) }
 						.iter()
-						.map(|x| Window(*x as XWindow, Rc::clone(display)))
+						.map(|x| Window {
+							window: *x as XWindow,
+							display: Rc::clone(display),
+						})
 						.collect();
 					unsafe { XFree(return_proper as *mut c_void) };
 					Windows(array)
@@ -136,58 +145,89 @@ impl Session {
 		Err(NotSupported)
 	}
 
-	/// Get window by provided name on the screen.
-	///
-	/// return [Window] on success or [None] if not found or error
+	/// Get windows where name match provided argument
 	pub fn get_window_by_name(&self, name: impl AsRef<[u8]>) -> Option<Window> {
 		let name = name.as_ref();
+		self.find_window(|it| it == name, 1).into_iter().next()
+	}
+
+	/// Get list window by predicate.
+	/// + limit = 0 for unlimited
+	///
+	/// return [Vec\<Window>] on success or empty [Vec] if not found or error
+	pub fn find_window<F>(&self, filter: F, mut limit: usize) -> Vec<Window>
+		where F: for<'a> Fn(&'a [u8]) -> bool {
 		let Session { display, .. } = self;
 		let root = self.root();
 		let atom = self.client_list();
-
+		if limit == 0 {
+			limit = usize::MAX;
+		}
 		let GetWindowPropertyResponse {
 			actual_type_return: return_type,
 			actual_format_return: return_format,
 			nitems_return: return_nitems,
 			proper_return: return_proper,
 			..
-		} = unsafe { get_window_property(display, root.clone(), *atom, XA_WINDOW).ok()? };
+		} = unsafe {
+			let prop = get_window_property(display, root.clone(), *atom, XA_WINDOW);
+			if let Ok(it) = prop {
+				it
+			} else {
+				return Vec::new();
+			}
+		};
 		if return_type == XA_WINDOW {
 			return match return_format {
 				8 => {
 					let res = unsafe { slice::from_raw_parts(return_proper as *mut u8, return_nitems as usize) }
 						.iter()
-						.map(|x| Window(*x as XWindow, Rc::clone(display)))
-						.find(|it| it.match_title(name));
+						.map(|x| Window {
+							window: *x as XWindow,
+							display: Rc::clone(display),
+						})
+						.filter(|it| filter(it.get_title().unwrap().as_ref().to_bytes()))
+						.take(limit)
+						.collect::<Vec<_>>();
 					unsafe { XFree(return_proper as *mut c_void) };
 					res
 				}
 				16 => {
 					let res = unsafe { slice::from_raw_parts(return_proper as *mut u16, return_nitems as usize) }
 						.iter()
-						.map(|x| Window(*x as XWindow, Rc::clone(display)))
-						.find(|it| it.match_title(name));
+						.map(|x| Window {
+							window: *x as XWindow,
+							display: Rc::clone(display),
+						})
+						.filter(|it| filter(it.get_title().unwrap().as_ref().to_bytes()))
+						.take(limit)
+						.collect::<Vec<_>>();
 					unsafe { XFree(return_proper as *mut c_void) };
 					res
 				}
 				32 => {
 					let res = unsafe { slice::from_raw_parts(return_proper as *mut usize, return_nitems as usize) }
 						.iter()
-						.map(|x| Window(*x as XWindow, Rc::clone(display)))
-						.find(|it| it.match_title(name));
+						.map(|x| Window {
+							window: *x as XWindow,
+							display: Rc::clone(display),
+						})
+						.filter(|it| filter(it.get_title().unwrap().as_ref().to_bytes()))
+						.take(limit)
+						.collect::<Vec<_>>();
 					unsafe { XFree(return_proper as *mut c_void) };
 					res
 				}
 				_ => {
 					unsafe { XFree(return_proper as *mut c_void) };
-					None
+					Vec::new()
 				}
 			};
 		} else {
 			unsafe { XFree(return_proper as *mut c_void) };
 		}
 
-		None
+		Vec::new()
 	}
 	/// Gets the currently active window in the display.
 	pub fn active_window(&mut self) -> Result<Window, NotSupported> {

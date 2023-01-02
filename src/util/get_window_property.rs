@@ -32,7 +32,7 @@ pub unsafe fn get_window_property(
 
     if XGetWindowProperty(
         display.0,
-        window.0,
+        window.window,
         property.0,
         0, 4096 / 4,
         XFalse,

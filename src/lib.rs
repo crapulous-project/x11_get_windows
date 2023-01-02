@@ -73,6 +73,7 @@ mod window;
 mod windows;
 /// Just some helpful functions if you require more functionality than this wrapper.
 pub mod util;
+pub mod event;
 
 pub use self::{
     atom::Atom,
