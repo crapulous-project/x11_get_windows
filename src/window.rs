@@ -7,15 +7,14 @@ use std::{
 };
 use std::borrow::BorrowMut;
 use std::ops::Deref;
+use std::rc::Rc;
 use std::slice::Windows;
 
 use x11::xlib::{Window as XWindow, XA_WINDOW, XAllPlanes, XDefaultRootWindow, XFree, XGetImage, XGetWindowAttributes, XGetWMName, XImage, XTextProperty, XWindowAttributes};
 use x11::xlib;
 
 use crate::{
-	Atom,
 	Display,
-	NET_ACTIVE_WINDOW,
 	NotSupported,
 	Null,
 	Session,
@@ -24,16 +23,21 @@ use crate::{
 
 /// This struct represents a window and holds the ID of that window that can be used
 /// to query for its name.
-#[derive(Copy, Clone, Debug)]
-pub struct Window(pub XWindow);
+pub struct Window(pub XWindow, pub Rc<Display>);
+
+impl Clone for Window {
+	fn clone(&self) -> Self {
+		Self(self.0, Rc::clone(&self.1))
+	}
+}
 
 impl Window {
 	/// Gets the default root window of a display.
 	///
 	/// A wrapper around the [XDefaultRootWindow] function.
-	pub fn default_root_window(display: &Display) -> Self {
+	pub fn default_root_window(display: Rc<Display>) -> Self {
 		let win = unsafe { XDefaultRootWindow(display.0) };
-		Window(win)
+		Window(win, display)
 	}
 	/// Gets the current active window.
 	///
@@ -41,26 +45,26 @@ impl Window {
 	/// that are set to [None] but are required.
 	/// This uses the display, root_window, and active_window_atom properties
 	/// of the [Session] struct.
-	pub fn active_window(session: &mut Session) -> Result<Self, NotSupported> {
-		let Session { display, root_window, active_window_atom, .. } = session;
-		let root_window = root_window.get_or_insert_with(|| Window::default_root_window(display));
-		let active_window_atom = active_window_atom.get_or_insert_with(|| Atom::new(display, NET_ACTIVE_WINDOW).unwrap());
-		let response = unsafe { get_window_property(display, *root_window, *active_window_atom, XA_WINDOW)? };
+	pub fn active_window(session: &Session) -> Result<Self, NotSupported> {
+		let Session { display, .. } = session;
+		let root_window = session.root().clone();
+		let active_window_atom = session.active_list();
+		let response = unsafe { get_window_property(display, root_window, *active_window_atom, XA_WINDOW)? };
 		let window = match response.actual_format_return {
 			8 => {
 				unsafe { slice::from_raw_parts(response.proper_return as *const u8, response.nitems_return as usize) }
 					.first()
-					.map(|x| Window(*x as XWindow))
+					.map(|x| Window(*x as XWindow, Rc::clone(display)))
 			}
 			16 => {
 				unsafe { slice::from_raw_parts(response.proper_return as *const u16, response.nitems_return as usize) }
 					.first()
-					.map(|x| Window(*x as XWindow))
+					.map(|x| Window(*x as XWindow, Rc::clone(display)))
 			}
 			32 => {
 				unsafe { slice::from_raw_parts(response.proper_return as *const usize, response.nitems_return as usize) }
 					.first()
-					.map(|x| Window(*x as XWindow))
+					.map(|x| Window(*x as XWindow, Rc::clone(display)))
 			}
 			_ => { None }
 		};
@@ -72,7 +76,7 @@ impl Window {
 	/// If the window does not have a title, a null pointer may be returned.
 	/// In that case the [Null] error is returned.
 	/// However, I have not encountered a [Null] error yet.
-	pub fn get_title(self, display: &Display) -> Result<WindowTitle, Null> {
+	pub fn get_title(&self, display: &Display) -> Result<WindowTitle, Null> {
 		let mut text_property = XTextProperty {
 			value: null_mut(),
 			encoding: 0,
@@ -92,7 +96,7 @@ impl Window {
 		} else { Err(Null) }
 	}
 
-	pub(crate) fn match_title(self, display: &Display, title: impl AsRef<[u8]>) -> bool {
+	pub(crate) fn match_title(&self, title: impl AsRef<[u8]>) -> bool {
 		let mut text_property = XTextProperty {
 			value: null_mut(),
 			encoding: 0,
@@ -101,7 +105,7 @@ impl Window {
 		};
 		unsafe {
 			XGetWMName(
-				display.0,
+				self.1.0,
 				self.0,
 				&mut text_property,
 			)
@@ -114,8 +118,8 @@ impl Window {
 		}
 	}
 
-	/// Capture screenshot of this window
-	pub fn capture(&self, display: &Display) -> XImg {
+	/// Get window attribute
+	pub fn get_attr(&self, display: &Display) -> XWindowAttributes {
 		let mut attr = XWindowAttributes {
 			x: 0,
 			y: 0,
@@ -142,7 +146,12 @@ impl Window {
 			screen: null_mut(),
 		};
 		unsafe { XGetWindowAttributes(display.0, self.0, attr.borrow_mut() as _) };
+		attr
+	}
 
+	/// Capture screenshot of this window
+	pub fn capture(&self, display: &Display) -> XImg {
+		let attr = self.get_attr(display);
 		let width = attr.width as u32;
 		let height = attr.height as u32;
 
@@ -160,12 +169,6 @@ impl<'a> AsRef<CStr> for WindowTitle<'a> {
 	}
 }
 
-impl WindowTitle<'_> {
-	fn as_bytes(&self) -> &[u8] {
-		self.0.to_bytes()
-	}
-}
-
 impl<'a> Drop for WindowTitle<'a> {
 	fn drop(&mut self) {
 		unsafe { XFree(self.0.as_ptr() as *mut c_void) };
@@ -179,15 +182,20 @@ pub struct XImg {
 	img: *mut XImage,
 }
 
+/// This struct represent pixel value from XImage
 #[repr(C, align(4))]
 pub struct XColor {
+	/// Blue value of current pixel
 	pub b: u8,
+	/// Green value of current pixel
 	pub g: u8,
+	/// Red value of current pixel
 	pub r: u8,
 	_pad: u8,
 }
 
 impl XColor {
+	/// Get gray scale value by sum RGB and divide by 3
 	pub fn grayscale_approx(&self) -> u8 {
 		((self.b as u16 + self.g as u16 + self.r as u16) / 3) as u8
 	}
@@ -205,7 +213,7 @@ impl Deref for XImg {
 	type Target = [XColor];
 	#[inline]
 	fn deref(&self) -> &[XColor] {
-		let len = ((self.height() * self.width()) as usize);
+		let len = (self.height() * self.width()) as usize;
 		unsafe { slice::from_raw_parts((*self.img).data as _, len) }
 	}
 }
@@ -226,14 +234,18 @@ impl XImg {
 	/// Get raw image pointer
 	#[inline]
 	pub fn as_ptr(&self) -> *mut XImage { self.img }
+}
 
-	/// Get image reference
+impl AsRef<XImage> for XImg {
 	#[inline]
-	pub fn as_ref(&self) -> &XImage { unsafe { self.img.as_ref() }.unwrap() }
+	fn as_ref(&self) -> &XImage { unsafe { self.img.as_ref() }.unwrap() }
+}
 
-	/// Get mutable image reference
+impl AsMut<XImage> for XImg {
 	#[inline]
-	pub fn as_mut(&mut self) -> &mut XImage { unsafe { self.img.as_mut() }.unwrap() }
+	fn as_mut(&mut self) -> &mut XImage {
+		unsafe { self.img.as_mut() }.unwrap()
+	}
 }
 
 impl Drop for XImg {
